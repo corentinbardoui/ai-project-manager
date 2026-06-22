@@ -49,10 +49,10 @@ export async function POST(req: Request) {
       : "";
 
     const boardSnapshot = JSON.stringify(
-      tasks.map((t) => ({ id: t.id, title: t.title, status: t.status }))
+      tasks.slice(0, 15).map((t) => ({ id: t.id, title: t.title, status: t.status }))
     );
 
-    systemPrompt = agentPrompt + contextSection + `\n\n## État actuel du pipeline\n${boardSnapshot}`;
+    systemPrompt = agentPrompt + contextSection + `\n\n## Pipeline (${tasks.length} tâches total, 15 premières)\n${boardSnapshot}`;
   }
 
   const allProcessed = messages.map(
@@ -69,53 +69,34 @@ export async function POST(req: Request) {
       return msg;
     }
   );
-  const processedMessages = allProcessed.slice(-12) as { role: "user" | "assistant" | "system"; content: string }[];
+  const processedMessages = allProcessed.slice(-4) as { role: "user" | "assistant" | "system"; content: string }[];
 
   const result = streamText({
     model: anthropic("claude-sonnet-4-6"),
     system: systemPrompt,
     messages: convertToCoreMessages(processedMessages),
     tools: {
-      create_task: tool({
+      propose_tasks: tool({
         description:
-          "Crée une nouvelle tâche dans le pipeline. Par défaut en `backlog`. Appelle ensuite `reprioritize_tasks` pour sélectionner les plus urgentes.",
+          "Propose des tâches à l'utilisateur sous forme de cartes dans le chat. NE les ajoute PAS en base — l'utilisateur choisit quelles tâches ajouter au board en cliquant sur le bouton.",
         parameters: z.object({
-          title: z.string().describe("Titre court et clair de la tâche"),
-          description: z.string().optional().describe("Description détaillée optionnelle"),
-          status: z
-            .enum(["backlog", "todo", "in_progress", "done"])
-            .default("backlog")
-            .describe("Section du pipeline — utilise 'backlog' par défaut"),
-          assignee_type: z
-            .enum(["human", "ai_agent_name"])
-            .default("human"),
+          tasks: z.array(z.object({
+            title: z.string().describe("Titre court et clair de la tâche"),
+            description: z.string().optional().describe("Description détaillée optionnelle"),
+            status: z.enum(["backlog", "todo"]).default("backlog").describe("Section suggérée"),
+          })).describe("Liste de tâches à proposer à l'utilisateur"),
         }),
-        execute: async ({ title, description, status, assignee_type }) => {
-          const posQuery = supabase.from("tasks").select("position").eq("status", status).order("position", { ascending: false }).limit(1);
-          if (workspaceId) posQuery.eq("workspace_id", workspaceId);
-          const { data: existing } = await posQuery;
-
-          const position = existing?.length ? existing[0].position + 1 : 0;
-
-          const { data, error } = await supabase
-            .from("tasks")
-            .insert({ title, description, status, assignee_type, position, created_by_agent_id: agentId || null, workspace_id: workspaceId || null })
-            .select()
-            .single();
-
-          if (error) return { success: false, error: error.message };
-          return { success: true, task: data };
-        },
+        execute: async ({ tasks }) => ({ proposed: tasks }),
       }),
 
       reprioritize_tasks: tool({
         description:
-          "Réévalue les priorités du pipeline. Passe les tâches les plus urgentes/actionnables en `todo` (Prochaines Actions, max 5). Remet le reste en `backlog`. À appeler après chaque création de tâches ou archivage.",
+          "Réévalue les priorités du pipeline. Passe les tâches les plus urgentes/actionnables en `todo` (Prochaines Actions, max 5). Remet le reste en `backlog`.",
         parameters: z.object({
           promote_ids: z
             .array(z.string())
             .max(5)
-            .describe("IDs des tâches à promouvoir en `todo` (Prochaines Actions) — max 5, les plus urgentes en premier"),
+            .describe("IDs des tâches à promouvoir en `todo` — max 5, les plus urgentes en premier"),
           reasoning: z
             .string()
             .describe("Explication courte du choix de priorisation"),
@@ -133,7 +114,6 @@ export async function POST(req: Request) {
             status: promoteSet.has(t.id) ? "todo" : "backlog" as PipelineStatus,
           }));
 
-          // Batch update
           await Promise.all(
             updates.map((u) =>
               supabase.from("tasks").update({ status: u.status }).eq("id", u.id)
@@ -162,7 +142,7 @@ export async function POST(req: Request) {
           if (new_status === "done") {
             return {
               success: false,
-              message: "Impossible de déplacer une tâche en Archives automatiquement. Seul l'utilisateur peut valider et archiver une tâche après en avoir vérifié le résultat. Informe simplement l'utilisateur que la tâche est terminée et qu'il peut l'archiver manuellement.",
+              message: "Impossible de déplacer une tâche en Archives automatiquement. Seul l'utilisateur peut archiver.",
             };
           }
 
@@ -215,7 +195,7 @@ export async function POST(req: Request) {
       }),
 
       save_project_context: tool({
-        description: "Sauvegarde le contexte du projet après l'onboarding. À appeler une fois que tu as recueilli le nom du projet, la description, le profil utilisateur et l'objectif.",
+        description: "Sauvegarde le contexte du projet après l'onboarding.",
         parameters: z.object({
           project_name: z.string().describe("Nom court du projet"),
           description:  z.string().describe("Description du projet en 2-3 phrases"),
@@ -234,7 +214,7 @@ export async function POST(req: Request) {
         },
       }),
     },
-    maxSteps: 15,
+    maxSteps: 4,
     onError: (err) => console.error("[api/chat] streamText error:", err),
     onFinish: ({ text, finishReason, usage }) =>
       console.log("[api/chat] done | reason:", finishReason, "| tokens:", usage, "| text len:", text.length),

@@ -2,7 +2,7 @@
 
 import { useRef, useEffect, useLayoutEffect, useState, useCallback } from "react";
 import { useChat, type Message } from "@ai-sdk/react";
-import { Send, Loader2, Zap, History, Plus, X, ArrowDown } from "lucide-react";
+import { Send, Loader2, Zap, History, Plus, X, ArrowDown, Check } from "lucide-react";
 import { VelaIcon } from "./VelaIcon";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -64,10 +64,13 @@ function ChatInner({
   const inputRef = useRef<HTMLInputElement>(null);
   const isAtBottom = useRef(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const [addedTasks, setAddedTasks] = useState<Set<string>>(new Set());
   const convIdRef = useRef(conversationId);
   const savedMessageIds = useRef<Set<string>>(new Set());
 
   useEffect(() => { convIdRef.current = conversationId; }, [conversationId]);
+
+  const [chatError, setChatError] = useState<string | null>(null);
 
   const { messages, input, handleInputChange, handleSubmit, status, setInput, append } =
     useChat({
@@ -75,8 +78,16 @@ function ChatInner({
       initialMessages,
       body: { tasks, agentId, isOnboarding: false, projectContext, workspaceId },
       experimental_throttle: 80,
-      onFinish: () => inputRef.current?.focus(),
-      onError: (err) => console.error("[chat] error:", err),
+      onFinish: () => { setChatError(null); inputRef.current?.focus(); },
+      onError: (err) => {
+        console.error("[chat] error:", err);
+        const msg = err instanceof Error ? err.message : String(err);
+        const isRateLimit = msg.toLowerCase().includes("rate limit") || msg.toLowerCase().includes("load failed");
+        setChatError(isRateLimit
+          ? "Limite de requêtes atteinte. Patiente quelques secondes et réessaie."
+          : `Erreur : ${msg}`
+        );
+      },
     });
 
   const isLoading = status === "streaming" || status === "submitted";
@@ -142,6 +153,30 @@ function ChatInner({
     },
     [input, agentId, handleSubmit, onConversationCreate]
   );
+
+  const handleAddProposedTask = useCallback(async (
+    key: string,
+    task: { title: string; description?: string; status: "backlog" | "todo" }
+  ) => {
+    setAddedTasks((prev) => new Set([...prev, key]));
+    const { data: existing } = await supabase
+      .from("tasks")
+      .select("position")
+      .eq("status", task.status)
+      .eq("workspace_id", workspaceId)
+      .order("position", { ascending: false })
+      .limit(1);
+    const position = existing?.length ? existing[0].position + 1 : 0;
+    await supabase.from("tasks").insert({
+      title: task.title,
+      description: task.description ?? null,
+      status: task.status,
+      assignee_type: "human",
+      position,
+      workspace_id: workspaceId,
+      created_by_agent_id: agentId || null,
+    });
+  }, [workspaceId, agentId]);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -297,6 +332,56 @@ function ChatInner({
                     {textContent}
                   </ReactMarkdown>
                 )}
+
+                {/* Proposed task cards from propose_tasks tool */}
+                {message.role === "assistant" && (() => {
+                  const part = message.parts?.find(
+                    (p) => p.type === "tool-invocation" &&
+                      p.toolInvocation.toolName === "propose_tasks" &&
+                      p.toolInvocation.state === "result"
+                  );
+                  if (!part || part.type !== "tool-invocation") return null;
+                  const inv = part.toolInvocation;
+                  if (inv.state !== "result") return null;
+                  const proposed = (inv.result as { proposed: Array<{ title: string; description?: string; status: "backlog" | "todo" }> }).proposed;
+                  if (!proposed?.length) return null;
+                  return (
+                    <div className="flex flex-col gap-1.5 mt-2 pt-2 border-t border-white/[0.06]">
+                      {proposed.map((task, i) => {
+                        const key = `${message.id}-${i}`;
+                        const added = addedTasks.has(key);
+                        return (
+                          <div key={key} className="flex items-start gap-2 bg-white/[0.04] border border-white/[0.07] rounded-xl p-2">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-medium text-white/85 leading-snug">{task.title}</p>
+                              {task.description && (
+                                <p className="text-[10px] text-white/35 mt-0.5 line-clamp-2 leading-snug">{task.description}</p>
+                              )}
+                              <span className={`inline-flex items-center mt-1 text-[10px] px-1.5 py-0.5 rounded-full ${
+                                task.status === "todo"
+                                  ? "bg-blue-500/15 text-blue-400/60"
+                                  : "bg-white/[0.05] text-white/25"
+                              }`}>
+                                {task.status === "todo" ? "Prochaines Actions" : "Backlog"}
+                              </span>
+                            </div>
+                            <button
+                              onClick={() => handleAddProposedTask(key, task)}
+                              disabled={added}
+                              className={`flex-shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium transition-all ${
+                                added
+                                  ? "bg-emerald-500/15 text-emerald-400/70 border border-emerald-500/20 cursor-default"
+                                  : "bg-brand-500/20 hover:bg-brand-500/30 text-brand-300 border border-brand-400/20"
+                              }`}
+                            >
+                              {added ? <><Check className="w-2.5 h-2.5" />Ajouté</> : "+ Ajouter"}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           );
@@ -326,6 +411,14 @@ function ChatInner({
         </button>
       )}
       </div>
+
+      {/* Error banner */}
+      {chatError && (
+        <div className="mx-3 mb-2 px-3 py-2 rounded-xl bg-red-500/10 border border-red-500/20 text-xs text-red-300/80 flex items-center justify-between gap-2">
+          <span>{chatError}</span>
+          <button onClick={() => setChatError(null)} className="text-red-400/50 hover:text-red-300 transition-colors flex-shrink-0">✕</button>
+        </div>
+      )}
 
       {/* Input */}
       <div className="px-3 py-2.5 border-t border-white/[0.06] bg-white/[0.02] backdrop-blur-xl">
@@ -495,13 +588,6 @@ export default function ChatPanel({ lastBoardEvent, tasks, agentId, onAgentChang
     setChatSessionKey(`new-${Date.now()}`);
     setShowHistory(false);
   }, []);
-
-  const taskCount = {
-    backlog: tasks.filter((t) => t.status === "backlog").length,
-    todo: tasks.filter((t) => t.status === "todo").length,
-    in_progress: tasks.filter((t) => t.status === "in_progress").length,
-    done: tasks.filter((t) => t.status === "done").length,
-  };
 
   return (
     <div className="flex flex-col h-full relative border-r border-white/[0.06]">

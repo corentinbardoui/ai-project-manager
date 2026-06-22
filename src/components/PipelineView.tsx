@@ -140,34 +140,34 @@ function CardAnimWrapper({ entering, exiting, enterIdx, children }: {
   const delay = `${enterIdx * 50}ms`;
 
   return (
-    // Outer wrapper handles height collapse
+    // Outer wrapper handles height collapse — width:100% ensures it always
+    // fills the flex parent even during grid-template-rows transitions.
     <div
       style={{
         display: "grid",
         gridTemplateRows: exiting ? "0fr" : "1fr",
-        transition: exiting
-          ? "grid-template-rows 0.22s ease 0.08s"
-          : "none",
+        transition: exiting ? "grid-template-rows 0.22s ease 0.08s" : "none",
+        width: "100%",
       }}
     >
-      {/* min-h-0 required for grid collapse trick */}
       <div style={{ overflow: "hidden", minHeight: 0 }}>
-        {/* Inner wrapper holds bottom spacing + opacity/scale animation */}
         <div
           style={{
             paddingBottom: "6px",
             opacity: exiting ? 0 : visible ? 1 : 0,
+            // Scale only on Y axis to avoid card width glitches during animation
             transform: exiting
-              ? "translateY(-3px) scale(0.96)"
+              ? "translateY(-3px) scaleY(0.96)"
               : visible
-              ? "translateY(0px) scale(1)"
-              : "translateY(10px) scale(0.96)",
+              ? "translateY(0px) scaleY(1)"
+              : "translateY(10px) scaleY(0.96)",
             transition: exiting
               ? "opacity 0.14s ease, transform 0.14s ease"
               : visible
               ? `opacity 0.26s ease, transform 0.34s cubic-bezier(0.34, 1.56, 0.64, 1) ${delay}`
               : "none",
             pointerEvents: exiting ? "none" : undefined,
+            transformOrigin: "top center",
           }}
         >
           {children}
@@ -504,7 +504,10 @@ export default function PipelineView({
   const validateTasks = applyFilter(tasks.filter((t) =>
     t.status !== "done" && t.status !== "backlog" && !!t.result && !runningSet.has(t.id)
   ));
-  const runningActive = applyFilter(tasks.filter((t) => runningSet.has(t.id)));
+  // Include in_progress+no result even if runningSet hasn't been updated yet — prevents tasks
+  // from disappearing between the Supabase status update and the local runningTasks update.
+  // Once the task has a result it falls through to validateTasks instead.
+  const runningActive = applyFilter(tasks.filter((t) => runningSet.has(t.id) || (t.status === "in_progress" && !t.result)));
   const nextTasks     = applyFilter(tasks.filter((t) =>
     t.status === "todo" && !t.result && !runningSet.has(t.id)
   ));
